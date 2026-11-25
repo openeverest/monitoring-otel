@@ -1,0 +1,391 @@
+// Copyright (C) 2026 The OpenEverest Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package controller
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	common "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
+	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
+	monitoringv1alpha1 "github.com/openeverest/openeverest/v2/api/monitoring/v1alpha1"
+	"github.com/openeverest/openeverest/v2/provider-runtime/monitoring"
+)
+
+const (
+	testNamespace   = "team-a"
+	testBindingName = "orders-otlp-5e1f0c2a"
+	testBindingUID  = types.UID("6a0e4b8e-3f0c-4d1c-9a51-1f4b0c9e2d11")
+	qanProfile      = "queryAnalytics"
+)
+
+func testBinding() *monitoringv1alpha1.MonitoringBinding {
+	return &monitoringv1alpha1.MonitoringBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testBindingName, Namespace: testNamespace, UID: testBindingUID, Generation: 1,
+			Labels: monitoring.BindingLabels("orders", "metrics", "otlp", "opentelemetry"),
+		},
+		Spec: monitoringv1alpha1.MonitoringBindingSpec{
+			InstanceRef:    common.ObjectRef{Name: "orders"},
+			DestinationRef: common.MonitoringDestinationRef{Kind: "MonitoringDestination", Name: "otlp"},
+			ClassRef:       &common.ObjectRef{Name: "opentelemetry"},
+			ExecutionMode:  corev1alpha1.MonitoringExecutionModeExtensionManaged,
+		},
+	}
+}
+
+func testIdentity() corev1alpha1.MonitoringIdentity {
+	return corev1alpha1.MonitoringIdentity{
+		ClusterID: "c1",
+		Labels: map[string]string{
+			"openeverest_instance":  "orders",
+			"openeverest_namespace": testNamespace,
+			"openeverest_provider":  "percona-xtradb-cluster",
+			"k8s_cluster_id":        "c1",
+		},
+	}
+}
+
+// identityRelabelings is what every endpoint carries for testIdentity, in
+// label name order.
+func identityRelabelings(component, kind string) []relabelConfig {
+	return []relabelConfig{
+		{TargetLabel: "k8s_cluster_id", Replacement: new("c1"), Action: "replace"},
+		{TargetLabel: "openeverest_component", Replacement: new(component), Action: "replace"},
+		{TargetLabel: "openeverest_instance", Replacement: new("orders"), Action: "replace"},
+		{TargetLabel: "openeverest_kind", Replacement: new(kind), Action: "replace"},
+		{TargetLabel: "openeverest_namespace", Replacement: new(testNamespace), Action: "replace"},
+		{TargetLabel: "openeverest_provider", Replacement: new("percona-xtradb-cluster"), Action: "replace"},
+	}
+}
+
+func engineSelector() map[string]string {
+	return map[string]string{monitoringv1alpha1.BindingInstanceLabel: "orders", "app.kubernetes.io/component": "pxc"}
+}
+
+func TestPodMonitorsForRendersOnePerComponent(t *testing.T) {
+	t.Parallel()
+	sources := &corev1alpha1.MonitoringSources{
+		Identity: testIdentity(),
+		Metrics: []corev1alpha1.MetricsEndpoint{
+			{Component: "engine", Kind: "mysql", PodSelector: engineSelector(), Port: intstr.FromString("metrics")},
+			{Component: "configServer", Kind: "mongodb", PodSelector: map[string]string{monitoringv1alpha1.BindingInstanceLabel: "orders", "app": "cfg"}, Port: intstr.FromInt32(9216)},
+			{Component: "engine", Kind: "mysql", PodSelector: engineSelector(), Port: intstr.FromString("probe"), Path: "/probe"},
+		},
+	}
+	params := destinationParameters{Endpoint: "https://otlp.example.com:4317"}
+
+	got, err := podMonitorsFor(testBinding(), "opentelemetry", sources, params)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	engine, configServer := got[0], got[1]
+	assert.Equal(t, testBindingName+"-engine", engine.Name)
+	assert.Equal(t, testBindingName+"-configserver", configServer.Name)
+	assert.Equal(t, metav1.TypeMeta{APIVersion: "monitoring.coreos.com/v1", Kind: "PodMonitor"}, engine.TypeMeta)
+	assert.Equal(t, testNamespace, engine.Namespace)
+	assert.Equal(t, map[string]string{
+		monitoringv1alpha1.BindingInstanceLabel:    "orders",
+		monitoringv1alpha1.BindingClassLabel:       "opentelemetry",
+		monitoringv1alpha1.BindingDestinationLabel: "otlp",
+	}, engine.Labels)
+	assert.Equal(t, []metav1.OwnerReference{{
+		APIVersion: "monitoring.openeverest.io/v1alpha1",
+		Kind:       "MonitoringBinding",
+		Name:       testBindingName,
+		UID:        testBindingUID,
+		Controller: new(true),
+	}}, engine.OwnerReferences)
+	assert.Equal(t, metav1.LabelSelector{MatchLabels: engineSelector()}, engine.Spec.Selector)
+	assert.Equal(t, namespaceSelector{MatchNames: []string{testNamespace}}, engine.Spec.NamespaceSelector)
+	assert.Equal(t, []podMetricsEndpoint{
+		{Port: "metrics", Path: "/metrics", Scheme: "http", Relabelings: identityRelabelings("engine", "mysql")},
+		{Port: "probe", Path: "/probe", Scheme: "http", Relabelings: identityRelabelings("engine", "mysql")},
+	}, engine.Spec.PodMetricsEndpoints)
+	assert.Equal(t, []podMetricsEndpoint{
+		{PortNumber: 9216, Path: "/metrics", Scheme: "http", Relabelings: identityRelabelings("configServer", "mongodb")},
+	}, configServer.Spec.PodMetricsEndpoints)
+}
+
+func TestPodMetricsEndpointFor(t *testing.T) {
+	t.Parallel()
+
+	credentials := []corev1alpha1.MonitoringCredential{
+		{Profile: "metrics", SecretRef: common.SecretRef{Name: "orders-monitoring-metrics"}},
+		{Profile: "queryAnalytics", SecretRef: common.SecretRef{Name: "orders-monitoring-qan"}},
+	}
+	tests := []struct {
+		name     string
+		endpoint corev1alpha1.MetricsEndpoint
+		params   destinationParameters
+		want     podMetricsEndpoint
+	}{
+		{
+			name:     "named port with path and scheme defaults",
+			endpoint: corev1alpha1.MetricsEndpoint{Port: intstr.FromString("metrics")},
+			want:     podMetricsEndpoint{Port: "metrics", Path: "/metrics", Scheme: "http"},
+		},
+		{
+			name:     "numbered port, path and scheme as published",
+			endpoint: corev1alpha1.MetricsEndpoint{Port: intstr.FromInt32(8404), Path: "/stats", Scheme: "https"},
+			want:     podMetricsEndpoint{PortNumber: 8404, Path: "/stats", Scheme: "https"},
+		},
+		{
+			name:     "scrape interval from the destination",
+			endpoint: corev1alpha1.MetricsEndpoint{Port: intstr.FromString("metrics")},
+			params:   destinationParameters{Interval: "30s"},
+			want:     podMetricsEndpoint{Port: "metrics", Path: "/metrics", Scheme: "http", Interval: "30s"},
+		},
+		{
+			name: "params copied verbatim",
+			endpoint: corev1alpha1.MetricsEndpoint{
+				Port:   intstr.FromString("metrics"),
+				Params: map[string][]string{"collect[]": {"global_status", "info_schema.processlist"}},
+			},
+			want: podMetricsEndpoint{
+				Port: "metrics", Path: "/metrics", Scheme: "http",
+				Params: map[string][]string{"collect[]": {"global_status", "info_schema.processlist"}},
+			},
+		},
+		{
+			name: "tls with CA and server name",
+			endpoint: corev1alpha1.MetricsEndpoint{
+				Port:   intstr.FromString("metrics"),
+				Scheme: "https",
+				TLS: &corev1alpha1.MetricsEndpointTLS{
+					TLSConfig:  common.TLSConfig{CA: &common.CABundleSource{SecretKeyRef: &common.SecretKeyRef{Name: "orders-ca", Key: "ca.crt"}}},
+					ServerName: "orders-pxc",
+				},
+			},
+			want: podMetricsEndpoint{
+				Port: "metrics", Path: "/metrics", Scheme: "https",
+				TLSConfig: &tlsConfig{
+					CA:         &secretOrConfigMap{Secret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-ca"}, Key: "ca.crt"}},
+					ServerName: "orders-pxc",
+				},
+			},
+		},
+		{
+			name: "tls without verification",
+			endpoint: corev1alpha1.MetricsEndpoint{
+				Port:   intstr.FromString("metrics"),
+				Scheme: "https",
+				TLS:    &corev1alpha1.MetricsEndpointTLS{TLSConfig: common.TLSConfig{InsecureSkipVerify: true}},
+			},
+			want: podMetricsEndpoint{
+				Port: "metrics", Path: "/metrics", Scheme: "https",
+				TLSConfig: &tlsConfig{InsecureSkipVerify: true},
+			},
+		},
+		{
+			name: "mutual tls with a client certificate",
+			endpoint: corev1alpha1.MetricsEndpoint{
+				Port:   intstr.FromString("metrics"),
+				Scheme: "https",
+				TLS: &corev1alpha1.MetricsEndpointTLS{
+					TLSConfig:                  common.TLSConfig{CA: &common.CABundleSource{SecretKeyRef: &common.SecretKeyRef{Name: "orders-ca", Key: "ca.crt"}}},
+					ClientCertificateSecretRef: &common.SecretRef{Name: "orders-metrics-client"},
+				},
+			},
+			want: podMetricsEndpoint{
+				Port: "metrics", Path: "/metrics", Scheme: "https",
+				TLSConfig: &tlsConfig{
+					CA:        &secretOrConfigMap{Secret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-ca"}, Key: "ca.crt"}},
+					Cert:      &secretOrConfigMap{Secret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-metrics-client"}, Key: "tls.crt"}},
+					KeySecret: &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-metrics-client"}, Key: "tls.key"},
+				},
+			},
+		},
+		{
+			name: "basic auth from the Instance's credential profile",
+			endpoint: corev1alpha1.MetricsEndpoint{
+				Port: intstr.FromString("metrics"),
+				Auth: &corev1alpha1.MetricsEndpointAuth{CredentialProfile: qanProfile},
+			},
+			want: podMetricsEndpoint{
+				Port: "metrics", Path: "/metrics", Scheme: "http",
+				BasicAuth: &basicAuth{
+					Username: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-monitoring-qan"}, Key: "username"},
+					Password: corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "orders-monitoring-qan"}, Key: "password"},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.endpoint.Component, tt.endpoint.Kind = "engine", "mysql"
+			sources := &corev1alpha1.MonitoringSources{Identity: testIdentity(), Credentials: credentials}
+			tt.want.Relabelings = identityRelabelings("engine", "mysql")
+
+			got, err := podMetricsEndpointFor(sources, tt.endpoint, tt.params)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestPodMetricsEndpointForRendersClientCertificate pins the wire shape the
+// operator reads: the client certificate is tlsConfig.cert.secret and
+// tlsConfig.keySecret, and both are absent when the endpoint has none.
+func TestPodMetricsEndpointForRendersClientCertificate(t *testing.T) {
+	t.Parallel()
+
+	tlsConfigOf := func(t *testing.T, ep corev1alpha1.MetricsEndpoint) map[string]any {
+		t.Helper()
+		ep.Component, ep.Kind, ep.PodSelector, ep.Port, ep.Scheme = "engine", "mysql", engineSelector(), intstr.FromString("metrics"), "https"
+		sources := &corev1alpha1.MonitoringSources{Identity: testIdentity(), Metrics: []corev1alpha1.MetricsEndpoint{ep}}
+		objs, err := podMonitorsFor(testBinding(), "prometheus", sources, destinationParameters{})
+		require.NoError(t, err)
+		require.Len(t, objs, 1)
+		u, err := objs[0].toUnstructured()
+		require.NoError(t, err)
+		endpoints, found, err := unstructured.NestedSlice(u.Object, "spec", "podMetricsEndpoints")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Len(t, endpoints, 1)
+		endpoint, ok := endpoints[0].(map[string]any)
+		require.True(t, ok)
+		tls, _, err := unstructured.NestedMap(endpoint, "tlsConfig")
+		require.NoError(t, err)
+		return tls
+	}
+
+	t.Run("client certificate set", func(t *testing.T) {
+		t.Parallel()
+		tls := tlsConfigOf(t, corev1alpha1.MetricsEndpoint{
+			TLS: &corev1alpha1.MetricsEndpointTLS{ClientCertificateSecretRef: &common.SecretRef{Name: "orders-metrics-client"}},
+		})
+		assert.Equal(t, map[string]any{
+			"cert":      map[string]any{"secret": map[string]any{"name": "orders-metrics-client", "key": "tls.crt"}},
+			"keySecret": map[string]any{"name": "orders-metrics-client", "key": "tls.key"},
+		}, tls)
+	})
+
+	t.Run("client certificate unset", func(t *testing.T) {
+		t.Parallel()
+		tls := tlsConfigOf(t, corev1alpha1.MetricsEndpoint{
+			TLS: &corev1alpha1.MetricsEndpointTLS{ServerName: "orders-pxc"},
+		})
+		assert.Equal(t, map[string]any{"serverName": "orders-pxc"}, tls)
+	})
+
+	t.Run("no tls", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, tlsConfigOf(t, corev1alpha1.MetricsEndpoint{}))
+	})
+}
+
+func TestPodMetricsEndpointForMultiTargetProbe(t *testing.T) {
+	t.Parallel()
+	sources := &corev1alpha1.MonitoringSources{Identity: corev1alpha1.MonitoringIdentity{Labels: map[string]string{"openeverest_instance": "orders"}}}
+	ep := corev1alpha1.MetricsEndpoint{
+		Component: "engine",
+		Kind:      "valkey",
+		Port:      intstr.FromString("exporter"),
+		Path:      "/scrape",
+		Params:    map[string][]string{"target": {"redis://orders-0:6379"}},
+	}
+
+	got, err := podMetricsEndpointFor(sources, ep, destinationParameters{})
+	require.NoError(t, err)
+	assert.Equal(t, []relabelConfig{
+		{TargetLabel: "openeverest_component", Replacement: new("engine"), Action: "replace"},
+		{TargetLabel: "openeverest_instance", Replacement: new("orders"), Action: "replace"},
+		{TargetLabel: "openeverest_kind", Replacement: new("valkey"), Action: "replace"},
+		{SourceLabels: []string{"__param_target"}, TargetLabel: "instance", Action: "replace"},
+	}, got.Relabelings)
+	assert.Equal(t, map[string][]string{"target": {"redis://orders-0:6379"}}, got.Params)
+}
+
+func TestPodMetricsEndpointForStampsOnlyTheContractIdentity(t *testing.T) {
+	t.Parallel()
+	identity := testIdentity()
+	identity.Labels["__address__"] = "attacker.example.com:9104"
+	identity.Labels["__scheme__"] = "https"
+	identity.Labels["team"] = "dba"
+	sources := &corev1alpha1.MonitoringSources{Identity: identity}
+	ep := corev1alpha1.MetricsEndpoint{Component: "engine", Kind: "mysql", Port: intstr.FromString("metrics")}
+
+	got, err := podMetricsEndpointFor(sources, ep, destinationParameters{})
+	require.NoError(t, err)
+	assert.Equal(t, identityRelabelings("engine", "mysql"), got.Relabelings)
+}
+
+func TestPodMonitorsForRejectsUnrenderableSources(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		metrics []corev1alpha1.MetricsEndpoint
+		wantErr string
+	}{
+		{
+			name:    "endpoint without a port",
+			metrics: []corev1alpha1.MetricsEndpoint{{Component: "engine", Kind: "mysql", PodSelector: engineSelector()}},
+			wantErr: `component "engine": metrics endpoint has no port`,
+		},
+		{
+			name: "credential profile the Instance does not publish",
+			metrics: []corev1alpha1.MetricsEndpoint{{
+				Component: "engine", Kind: "mysql", PodSelector: engineSelector(), Port: intstr.FromString("metrics"),
+				Auth: &corev1alpha1.MetricsEndpointAuth{CredentialProfile: qanProfile},
+			}},
+			wantErr: `component "engine": credential profile "queryAnalytics" is not published by the Instance`,
+		},
+		{
+			name: "endpoints of one component selecting different pods",
+			metrics: []corev1alpha1.MetricsEndpoint{
+				{Component: "engine", Kind: "mysql", PodSelector: engineSelector(), Port: intstr.FromString("metrics")},
+				{Component: "engine", Kind: "mysql", PodSelector: map[string]string{monitoringv1alpha1.BindingInstanceLabel: "orders", "app": "other"}, Port: intstr.FromString("metrics")},
+			},
+			wantErr: `metrics endpoints of component "engine" select different pods`,
+		},
+		{
+			name: "pod selector of another Instance",
+			metrics: []corev1alpha1.MetricsEndpoint{
+				{Component: "engine", Kind: "mysql", PodSelector: engineSelector(), Port: intstr.FromString("metrics")},
+				{Component: "proxy", Kind: "haproxy", PodSelector: map[string]string{monitoringv1alpha1.BindingInstanceLabel: "payments"}, Port: intstr.FromInt32(8404)},
+			},
+			wantErr: `component "proxy": pod selector does not select core.openeverest.io/instance=orders`,
+		},
+		{
+			name: "pod selector without the Instance label",
+			metrics: []corev1alpha1.MetricsEndpoint{
+				{Component: "engine", Kind: "mysql", PodSelector: map[string]string{"app.kubernetes.io/component": "pxc"}, Port: intstr.FromString("metrics")},
+			},
+			wantErr: `component "engine": pod selector does not select core.openeverest.io/instance=orders`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sources := &corev1alpha1.MonitoringSources{
+				Identity:    testIdentity(),
+				Credentials: []corev1alpha1.MonitoringCredential{{Profile: "metrics", SecretRef: common.SecretRef{Name: "orders-monitoring-metrics"}}},
+				Metrics:     tt.metrics,
+			}
+			_, err := podMonitorsFor(testBinding(), "prometheus", sources, destinationParameters{})
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
+}

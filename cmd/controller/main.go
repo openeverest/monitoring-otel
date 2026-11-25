@@ -1,0 +1,101 @@
+// Copyright (C) 2026 The OpenEverest Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Command monitoring-otel is the ExtensionManaged MonitoringClass
+// controller for OpenTelemetry: one OpenTelemetry Collector per
+// MonitoringDestination, scraping one PodMonitor per component of every
+// bound Instance and exporting over OTLP.
+package main
+
+import (
+	"flag"
+	"os"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
+	monitoringv1alpha1 "github.com/openeverest/openeverest/v2/api/monitoring/v1alpha1"
+
+	"github.com/openeverest/monitoring-otel/internal/controller"
+)
+
+func main() {
+	var metricsAddr, probeAddr, controllerName, taClusterRole, collectorImage string
+	var leaderElect, taMTLS bool
+	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "Metrics endpoint bind address ('0' disables it).")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "Health probe endpoint bind address.")
+	flag.BoolVar(&leaderElect, "leader-elect", false, "Enable leader election; the lease is named after the controller name.")
+	flag.StringVar(&controllerName, "controller-name", "openeverest.io/monitoring-otel",
+		"Controller name this controller claims MonitoringClasses by: it serves every class whose spec.controllerName equals it.")
+	flag.StringVar(&taClusterRole, "target-allocator-cluster-role", "monitoring-otel-target-allocator",
+		"ClusterRole bound, in each destination's namespace, to the target allocator of the destination's collector.")
+	flag.StringVar(&collectorImage, "collector-image", "", "Collector image; empty uses the OpenTelemetry Operator default.")
+	flag.BoolVar(&taMTLS, "target-allocator-mtls", true,
+		"Secure the target allocator to collector link with cert-manager issued mTLS, so scrape credentials and CAs referenced by PodMonitors reach the collector.")
+	opts := zap.Options{Development: false}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(corev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1alpha1.AddToScheme(scheme))
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         leaderElect,
+		LeaderElectionID:       leaseName(controllerName),
+	})
+	if err != nil {
+		ctrl.Log.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		ctrl.Log.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		ctrl.Log.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+	if err := controller.Setup(mgr, controller.Options{
+		ControllerName:             controllerName,
+		TargetAllocatorClusterRole: taClusterRole,
+		CollectorImage:             collectorImage,
+		TargetAllocatorMTLS:        taMTLS,
+	}); err != nil {
+		ctrl.Log.Error(err, "unable to set up controller")
+		os.Exit(1)
+	}
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		ctrl.Log.Error(err, "manager exited")
+		os.Exit(1)
+	}
+}
+
+// leaseName is the leader election lease of the controller named
+// controllerName, a DNS subdomain: "/" and "_" are not allowed in one.
+func leaseName(controllerName string) string {
+	return strings.NewReplacer("/", "-", "_", "-").Replace(controllerName) + ".monitoring-otel.openeverest.io"
+}
