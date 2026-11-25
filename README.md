@@ -24,6 +24,12 @@ provider-specific.
 > Prometheus Operator CRDs (only the CRDs: `PodMonitor` is how targets reach the collector)
 > and cert-manager. It installs none of them.
 
+## Compatibility
+
+| monitoring-otel | OpenEverest | OpenTelemetry Operator |
+|---|---|---|
+| `0.1.x` | `2.0.0-alpha.1` | `v0.162` or later |
+
 ## How it fits
 
 ```mermaid
