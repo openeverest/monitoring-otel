@@ -1,0 +1,20 @@
+apiVersion: v2
+name: monitoring-otel
+description: OpenEverest monitoring extension for OpenTelemetry (OTLP). Ships the MonitoringClass and its controller.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - openeverest
+  - monitoring
+  - extension
+  - opentelemetry
+  - otlp
+home: https://github.com/openeverest/monitoring-otel
+sources:
+  - https://github.com/openeverest/monitoring-otel
+maintainers:
+  - name: OpenEverest Contributors
+annotations:
+  openeverest.io/extension-type: monitoring
+# OpenEverest (controller + CRDs) must be installed before this chart.

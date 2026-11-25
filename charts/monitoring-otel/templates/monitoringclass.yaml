@@ -1,0 +1,123 @@
+{{- if .Values.class.create -}}
+apiVersion: monitoring.openeverest.io/v1alpha1
+kind: MonitoringClass
+metadata:
+  name: {{ .Values.class.name }}
+  labels:
+    {{- include "monitoring-otel.labels" . | nindent 4 }}
+spec:
+  controllerName: {{ .Values.class.controllerName }}
+  displayName: {{ .Values.class.displayName }}
+  description: Runs an OpenTelemetry Collector per destination that scrapes the metrics endpoints of every Instance sending to it and exports them over OTLP.
+  extensionManaged:
+    requires:
+      metrics: true
+  authModes:
+    - name: Anonymous
+    - name: BasicAuth
+      credentials:
+        required: [username, password]
+    - name: BearerToken
+      credentials:
+        required: [token]
+    - name: APIKey
+      credentials:
+        required: [apiKey]
+  destinationParametersSchema:
+    openAPIV3Schema:
+      type: object
+      additionalProperties: false
+      required: [endpoint]
+      properties:
+        endpoint:
+          type: string
+          description: OTLP receiver URL. For grpc, the server address (https://otlp.example.com:4317); for http/protobuf, the base URL the exporter appends /v1/metrics to.
+          pattern: '^https?://.+'
+        protocol:
+          type: string
+          description: OTLP transport.
+          enum: [grpc, http/protobuf]
+          default: grpc
+        headers:
+          type: object
+          description: Extra, non-secret request headers (e.g. a tenant id). Authorization comes from the authentication mode.
+          additionalProperties:
+            type: string
+        apiKeyHeader:
+          type: string
+          description: Header the APIKey credential is sent in (e.g. x-honeycomb-team, DD-API-KEY). Required with the APIKey authentication mode.
+        compression:
+          type: string
+          enum: [gzip, zstd, none]
+          default: gzip
+        interval:
+          type: string
+          description: Scrape interval as a Prometheus duration (e.g. 30s). Empty uses 30s.
+          pattern: '^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$'
+  uiSchema:
+    destination:
+      componentsOrder: [endpoint, protocol, apiKeyHeader, interval]
+      components:
+        endpoint:
+          path: parameters.endpoint
+          uiType: text
+          fieldParams:
+            label: OTLP endpoint
+            placeholder: https://otlp.example.com:4317
+            helperText: OTLP receiver reachable from the cluster.
+          validation:
+            required: true
+            url: true
+        protocol:
+          path: parameters.protocol
+          uiType: select
+          fieldParams:
+            label: Protocol
+            defaultValue: grpc
+            options:
+              - {label: gRPC, value: grpc}
+              - {label: HTTP (protobuf), value: http/protobuf}
+        apiKeyHeader:
+          path: parameters.apiKeyHeader
+          uiType: text
+          fieldParams:
+            label: API key header
+            placeholder: x-api-key
+            helperText: Only for the API key authentication mode.
+        interval:
+          path: parameters.interval
+          uiType: text
+          fieldParams:
+            label: Scrape interval
+            placeholder: 30s
+    credentials:
+      BasicAuth:
+        componentsOrder: [username, password]
+        components:
+          username:
+            path: username
+            uiType: text
+            fieldParams: {label: Username}
+            validation: {required: true}
+          password:
+            path: password
+            uiType: text
+            fieldParams: {label: Password, type: password}
+            validation: {required: true}
+      BearerToken:
+        componentsOrder: [token]
+        components:
+          token:
+            path: token
+            uiType: text
+            fieldParams: {label: Bearer token, type: password}
+            validation: {required: true}
+      APIKey:
+        componentsOrder: [apiKey]
+        components:
+          apiKey:
+            path: apiKey
+            uiType: text
+            fieldParams: {label: API key, type: password}
+            validation: {required: true}
+{{- end }}

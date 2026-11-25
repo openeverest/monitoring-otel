@@ -1,0 +1,58 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "monitoring-otel.fullname" . }}
+  labels:
+    {{- include "monitoring-otel.labels" . | nindent 4 }}
+# A class controller reads the monitoring kinds and Instances and writes only
+# monitoring status. It never writes Instances or reads Secrets: collectors
+# get the destination credentials through secretKeyRef environment variables.
+rules:
+  - apiGroups: [monitoring.openeverest.io]
+    resources: [monitoringclasses, monitoringdestinations, monitoringbindings]
+    verbs: [get, list, watch]
+  - apiGroups: [monitoring.openeverest.io]
+    resources: [monitoringclasses/status, monitoringdestinations/status, monitoringbindings/status]
+    verbs: [patch]
+  - apiGroups: [core.openeverest.io]
+    resources: [instances]
+    verbs: [get, list, watch]
+  # One PodMonitor per component of every binding.
+  - apiGroups: [monitoring.coreos.com]
+    resources: [podmonitors]
+    verbs: [get, list, create, patch, delete]
+  # One collector per destination.
+  - apiGroups: [opentelemetry.io]
+    resources: [opentelemetrycollectors]
+    verbs: [get, list, create, patch, delete]
+  # The target allocator of each collector is bound to the ClusterRole below
+  # in the destination's namespace; bind is limited to that role.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [get, list, create, patch, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ include "monitoring-otel.targetAllocatorClusterRole" . }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "monitoring-otel.targetAllocatorClusterRole" . }}
+  labels:
+    {{- include "monitoring-otel.labels" . | nindent 4 }}
+# What a collector's target allocator needs in its destination's namespace to
+# discover the binding PodMonitors and the pods they select, and to resolve
+# the Secrets they reference (scrape credentials, TLS CAs).
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, configmaps, secrets, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [monitoring.coreos.com]
+    resources: [podmonitors, servicemonitors, scrapeconfigs, probes]
+    verbs: [get, list, watch]
+{{- end }}

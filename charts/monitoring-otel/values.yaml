@@ -1,0 +1,97 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/openeverest/monitoring-otel
+  pullPolicy: IfNotPresent
+  # Defaults to the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  automountServiceAccountToken: true
+  name: ""
+
+rbac:
+  create: true
+
+# The MonitoringClass this chart installs. The class is cluster-scoped;
+# destinations reference it by name. The controller claims every class whose
+# controllerName is class.controllerName (--controller-name).
+class:
+  create: true
+  name: opentelemetry
+  controllerName: openeverest.io/monitoring-otel
+  displayName: OpenTelemetry (OTLP)
+
+# The OpenTelemetry Collector run for each destination, by the
+# OpenTelemetry Operator.
+collector:
+  # Collector image; empty uses the OpenTelemetry Operator default. It must
+  # include the prometheus receiver, the otlp and otlphttp exporters and the
+  # basicauth and bearertokenauth extensions (e.g. otel/opentelemetry-collector-k8s).
+  image: ""
+  # Secure the target allocator to collector link with cert-manager issued
+  # mTLS, so scrape credentials and CAs referenced by PodMonitors reach the
+  # collector. Requires cert-manager.
+  targetAllocatorMTLS: true
+
+podAnnotations: {}
+podLabels: {}
+
+# Pod Security Standards "restricted"; 65532 is the nonroot user of the
+# distroless image.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 20m
+    memory: 64Mi
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: probes
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: probes
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+leaderElection:
+  enabled: true
+
+logLevel: info
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+extraEnv: []
