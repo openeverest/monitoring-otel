@@ -30,6 +30,10 @@ provider-specific.
 |---|---|---|
 | `0.1.x` | `2.0.0-alpha.1` | `v0.162` or later |
 
+The chart and its `MonitoringClass` carry the annotation `openeverest.io/contract-version`, the
+contract version of the OpenEverest the controller is built against. It names the oldest
+OpenEverest the build works with.
+
 ## How it fits
 
 ```mermaid
@@ -133,6 +137,7 @@ kubectl get monitoringclass opentelemetry
 | `class.controllerName` | `openeverest.io/monitoring-otel` | Controller name the class is claimed by |
 | `collector.image` | operator default | Collector image |
 | `collector.targetAllocatorMTLS` | `true` | mTLS between Target Allocator and collector |
+| `compatibility.acknowledge.coreVersion` | `""` | OpenEverest release on which to run this build although it does not support it, such as `2.0.0` |
 
 The chart also installs a `<release>-target-allocator` ClusterRole. The controller binds it,
 with a RoleBinding in the destination's namespace only, to each collector's Target Allocator,
@@ -211,6 +216,8 @@ Allocator about 30 MiB; the controller 15 MiB.
 make test-unit   # unit tests
 make lint        # golangci-lint
 make helm-lint   # chart lint
+make generate    # stamp the chart with the OpenEverest contract version
+make verify      # fail on stale generated files or a missing stamp
 make run         # run against the current kubeconfig
 ```
 
