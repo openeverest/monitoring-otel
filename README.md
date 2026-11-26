@@ -122,6 +122,10 @@ spec:
   `otel/opentelemetry-collector-k8s` (`manager.collectorImage.repository` of its chart).
 - The Prometheus Operator CRDs, e.g. the `prometheus-community/prometheus-operator-crds` chart.
 
+The controller, collector and Target Allocator pods meet the Pod Security Standard
+`restricted` and pin no user or group IDs, so they also run under OpenShift's default
+`restricted-v2` SCC. A custom `collector.image` must declare a numeric non-root `USER`.
+
 ## Installation
 
 ```bash

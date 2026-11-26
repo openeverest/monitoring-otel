@@ -161,3 +161,8 @@ jobs:
             || { echo '::error::the MonitoringClass is not named opentelemetry'; exit 1; }
           grep -q '^  controllerName: openeverest.io/monitoring-otel$' /tmp/rendered.yaml \
             || { echo '::error::the MonitoringClass does not name the controller'; exit 1; }
+          # OpenShift's restricted-v2 SCC rejects pods that pin IDs outside the
+          # namespace's range; the image's USER is enough.
+          if grep -En '^\s*(runAsUser|runAsGroup|fsGroup):' /tmp/rendered.yaml; then
+            echo '::error::the chart pins a user or group ID'; exit 1
+          fi

@@ -21,6 +21,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -112,6 +113,48 @@ func TestCollectorForPlaintextHTTPWithAPIKey(t *testing.T) {
 	_, mtls, err := unstructured.NestedFieldNoCopy(obj, "spec", "targetAllocator", "mtls")
 	require.NoError(t, err)
 	assert.False(t, mtls)
+}
+
+// The collector and target allocator pods must pass the Pod Security
+// Standard "restricted" and must not pin user or group IDs, which OpenShift's
+// restricted-v2 SCC rejects.
+func TestCollectorPodsAreRestrictedWithoutFixedIDs(t *testing.T) {
+	t.Parallel()
+	obj := renderCollector(t, testDestination(`{"endpoint":"https://otlp.example.com:4317"}`), collectorOptions{TargetAllocatorMTLS: true})
+
+	for _, owner := range [][]string{{"spec"}, {"spec", "targetAllocator"}} {
+		t.Run(strings.Join(owner, "."), func(t *testing.T) {
+			t.Parallel()
+			var pod corev1.PodSecurityContext
+			decodeStrict(t, obj, &pod, append(owner, "podSecurityContext")...)
+			var container corev1.SecurityContext
+			decodeStrict(t, obj, &container, append(owner, "securityContext")...)
+
+			require.NotNil(t, pod.RunAsNonRoot)
+			assert.True(t, *pod.RunAsNonRoot)
+			require.NotNil(t, pod.SeccompProfile)
+			assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, pod.SeccompProfile.Type)
+			require.NotNil(t, container.AllowPrivilegeEscalation)
+			assert.False(t, *container.AllowPrivilegeEscalation)
+			require.NotNil(t, container.Capabilities)
+			assert.Equal(t, []corev1.Capability{"ALL"}, container.Capabilities.Drop)
+
+			assert.Nil(t, pod.RunAsUser)
+			assert.Nil(t, pod.RunAsGroup)
+			assert.Nil(t, pod.FSGroup)
+			assert.Nil(t, container.RunAsUser)
+			assert.Nil(t, container.RunAsGroup)
+		})
+	}
+}
+
+// decodeStrict decodes the map at path into out, failing on unknown fields.
+func decodeStrict(t *testing.T, obj map[string]any, out any, path ...string) {
+	t.Helper()
+	m, found, err := unstructured.NestedMap(obj, path...)
+	require.NoError(t, err)
+	require.True(t, found, "missing %s", strings.Join(path, "."))
+	require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructuredWithValidation(m, out, true))
 }
 
 func TestCollectorForAPIKeyNeedsItsHeader(t *testing.T) {
