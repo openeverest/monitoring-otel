@@ -112,7 +112,9 @@ func collectorFor(dst *monitoringv1alpha1.MonitoringDestination, params destinat
 			"requests": map[string]any{"cpu": "50m", "memory": "128Mi"},
 			"limits":   map[string]any{"memory": "512Mi"},
 		},
-		"config": collectorConfig(exporterName, exporter, extensions, extensionNames),
+		"config":             collectorConfig(exporterName, exporter, extensions, extensionNames),
+		"podSecurityContext": restrictedPodSecurityContext(),
+		"securityContext":    restrictedContainerSecurityContext(),
 	}
 	if opts.Image != "" {
 		spec["image"] = opts.Image
@@ -164,11 +166,33 @@ func targetAllocatorFor(dst *monitoringv1alpha1.MonitoringDestination, params de
 			// v1beta1 requires both selectors; no ServiceMonitor carries these labels.
 			"serviceMonitorSelector": map[string]any{"matchLabels": selector},
 		},
+		"podSecurityContext": restrictedPodSecurityContext(),
+		"securityContext":    restrictedContainerSecurityContext(),
 	}
 	if opts.TargetAllocatorMTLS {
 		ta["mtls"] = map[string]any{keyEnabled: true}
 	}
 	return ta
+}
+
+// restrictedPodSecurityContext satisfies the Pod Security Standard
+// "restricted" without fixed user or group IDs: the collector and target
+// allocator images declare a numeric non-root USER, and OpenShift's
+// restricted-v2 SCC assigns IDs from the namespace's range.
+func restrictedPodSecurityContext() map[string]any {
+	return map[string]any{
+		"runAsNonRoot":   true,
+		"seccompProfile": map[string]any{"type": "RuntimeDefault"},
+	}
+}
+
+// restrictedContainerSecurityContext is the container half of the
+// Pod Security Standard "restricted".
+func restrictedContainerSecurityContext() map[string]any {
+	return map[string]any{
+		"allowPrivilegeEscalation": false,
+		"capabilities":             map[string]any{"drop": []any{"ALL"}},
+	}
 }
 
 // collectorConfig is the collector pipeline: the prometheus receiver fed by
